@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+speech_to_text/
+
+# PyInstaller
+*.spec
+dist/
+build/
+
+# PyQt5 or PySide cache
+*.qmlc
+*.qrc
+
+# VSCode / IDE
+.vscode/
+.idea/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Arquivos de áudio e texto gerados
+*.wav
+*.mp3
+*.m4a
+transcricao.txt
