@@ -1,258 +1,77 @@
-import sys
+# app_window.py
+
 import os
+import sys
 import tempfile
-import threading
-import time
-import numpy as np
+import shutil
 from datetime import datetime
 
-import whisper
-import sounddevice as sd
-import soundfile as sf
 import pyperclip
-from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QTextEdit, QComboBox, QLabel, QFileDialog, QMessageBox, QCheckBox
-)
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread
+from PySide6.QtWidgets import QWidget, QFileDialog, QMessageBox
+from PySide6.QtCore import QTimer
 
-class RecordingThread(QThread):
-    """Thread para gravação de áudio"""
-    recording_finished = Signal(str, bool)  # Sinal com caminho do arquivo e se deve manter
-    recording_error = Signal(str)     # Sinal com mensagem de erro
-    recording_update = Signal(int)    # Sinal para atualizar tempo decorrido
-    
-    def __init__(self, device_idx, output_path, devices, keep_audio=False):
-        super().__init__()
-        self.device_idx = device_idx
-        self.output_path = output_path
-        self.devices = devices
-        self.should_stop = False
-        self.keep_audio = keep_audio
-        
-    def stop_recording(self):
-        """Para a gravação"""
-        self.should_stop = True
-        
-    def run(self):
-        try:
-            print(f"Iniciando gravação no device {self.device_idx}")
-            
-            # Obtém informações do dispositivo
-            device_info = self.devices[self.device_idx]
-            samplerate = int(device_info['default_samplerate'])
-            channels = 1
-            
-            print(f"Gravando: {samplerate}Hz, {channels} canal(is)")
-            
-            # Lista para armazenar chunks de áudio
-            audio_chunks = []
-            chunk_duration = 0.1  # 100ms por chunk
-            chunk_samples = int(chunk_duration * samplerate)
-            
-            # Tenta diferentes formatos de dados até encontrar um compatível
-            dtypes_to_try = ['float32', 'int16', 'int32', 'float64']
-            stream = None
-            
-            for dtype in dtypes_to_try:
-                try:
-                    print(f"Tentando formato: {dtype}")
-                    stream = sd.InputStream(
-                        device=self.device_idx,
-                        channels=channels,
-                        samplerate=samplerate,
-                        dtype=dtype
-                    )
-                    print(f"Formato {dtype} aceito!")
-                    break
-                except Exception as e:
-                    print(f"Formato {dtype} falhou: {e}")
-                    if stream:
-                        stream.close()
-                    stream = None
-            
-            if stream is None:
-                raise Exception("Nenhum formato de áudio compatível encontrado para este dispositivo")
-            
-            with stream:
-                elapsed_seconds = 0
-                
-                while not self.should_stop:
-                    # Lê um chunk de áudio
-                    audio_chunk, overflowed = stream.read(chunk_samples)
-                    
-                    if overflowed:
-                        print("Buffer overflow detectado")
-                    
-                    # Converte para float64 para consistência no processamento
-                    if audio_chunk.dtype != np.float64:
-                        audio_chunk = audio_chunk.astype(np.float64)
-                    
-                    audio_chunks.append(audio_chunk.copy())
-                    
-                    # Atualiza tempo a cada segundo aproximadamente
-                    elapsed_seconds += chunk_duration
-                    if elapsed_seconds >= 1.0:
-                        self.recording_update.emit(int(len(audio_chunks) * chunk_duration))
-                        elapsed_seconds = 0
-                    
-                    # Pequena pausa para não sobrecarregar
-                    time.sleep(0.01)
-            
-            print("Gravação interrompida, processando áudio...")
-            
-            # Concatena todos os chunks
-            if audio_chunks:
-                recording = np.concatenate(audio_chunks, axis=0)
-                
-                # Normaliza o áudio se necessário
-                if recording.dtype != np.float64:
-                    recording = recording.astype(np.float64)
-                
-                # Salva o arquivo
-                sf.write(self.output_path, recording, samplerate)
-                print(f"Arquivo salvo: {self.output_path}")
-                
-                # Emite sinal de sucesso
-                self.recording_finished.emit(self.output_path, self.keep_audio)
-            else:
-                self.recording_error.emit("Nenhum áudio foi gravado")
-            
-        except Exception as e:
-            print(f"Erro na gravação: {e}")
-            self.recording_error.emit(str(e))
-
-class TranscriptionThread(QThread):
-    """Thread para transcrição de áudio"""
-    transcription_finished = Signal(str, str, bool)  # Sinal com texto transcrito, caminho do arquivo, e se deve manter
-    transcription_error = Signal(str)     # Sinal com mensagem de erro
-    
-    def __init__(self, model, file_path, keep_audio=False):
-        super().__init__()
-        self.model = model
-        self.file_path = file_path
-        self.keep_audio = keep_audio
-        
-    def run(self):
-        try:
-            print(f"Iniciando transcrição de: {self.file_path}")
-            result = self.model.transcribe(self.file_path, language="pt")
-            text = result.get("text", "").strip()
-            print(f"Transcrição concluída: {len(text)} caracteres")
-            
-            self.transcription_finished.emit(text, self.file_path, self.keep_audio)
-            
-        except Exception as e:
-            print(f"Erro na transcrição: {e}")
-            self.transcription_error.emit(str(e))
+# Importações dos componentes locais
+from .ui.main_ui import setup_ui
+from .ui.styles import BTN_RECORD_ACTIVE_STYLE, BTN_COPY_SUCCESS_STYLE
+from .services.device_manager import get_audio_devices
+from .services.audio_recorder import RecordingThread
+from .services.transcriber import TranscriptionThread, get_model
 
 class TranscricaoApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Transcrição de Áudio")
         self.setMinimumSize(600, 400)
-        self.model = whisper.load_model("base")  # Carrega o modelo uma vez
+        
+        # Estado da aplicação
+        self.model = get_model()
         self.is_recording = False
         self.recording_thread = None
         self.transcription_thread = None
-        self.current_audio_file = None  # Para controle de arquivos temporários
+        self.current_audio_file = None
+        self.devices = None # Armazena a lista completa de dispositivos
 
-        # Layout principal
-        main_layout = QVBoxLayout()
-
-        # Seletor de microfone
-        mic_layout = QHBoxLayout()
-        mic_label = QLabel("Microfone:")
-        self.mic_combo = QComboBox()
+        # Configuração da UI
+        setup_ui(self)
         self._populate_mics()
-        mic_layout.addWidget(mic_label)
-        mic_layout.addWidget(self.mic_combo)
-        main_layout.addLayout(mic_layout)
+        self._connect_signals()
 
-        # Opção de salvar áudio
-        save_layout = QHBoxLayout()
-        self.save_audio_checkbox = QCheckBox("Salvar áudio após gravação")
-        self.save_audio_checkbox.setToolTip("Se marcado, será solicitado onde salvar o arquivo de áudio")
-        save_layout.addWidget(self.save_audio_checkbox)
-        save_layout.addStretch()  # Empurra checkbox para a esquerda
-        main_layout.addLayout(save_layout)
-
-        # Botões de gravação e seleção de arquivo
-        btn_layout = QHBoxLayout()
-        self.btn_record = QPushButton("Iniciar Gravação")
+    def _connect_signals(self):
+        """Conecta os sinais dos widgets aos slots (métodos)."""
         self.btn_record.clicked.connect(self._on_record_toggle)
-        self.btn_file = QPushButton("Selecionar Áudio")
         self.btn_file.clicked.connect(self._on_select_file)
-        btn_layout.addWidget(self.btn_record)
-        btn_layout.addWidget(self.btn_file)
-        main_layout.addLayout(btn_layout)
-
-        # Label de status
-        self.status_label = QLabel("Pronto para gravar ou selecionar arquivo")
-        self.status_label.setStyleSheet("color: blue; font-weight: bold;")
-        main_layout.addWidget(self.status_label)
-
-        # Área de texto com transcrição
-        self.text_edit = QTextEdit()
-        self.text_edit.setReadOnly(True)
-        main_layout.addWidget(self.text_edit)
-
-        # Layout inferior com botões
-        bottom_layout = QHBoxLayout()
-        
-        # Botão de salvar áudio (inicialmente oculto)
-        self.btn_save_audio = QPushButton("💾 Salvar Áudio")
-        self.btn_save_audio.clicked.connect(self._save_current_audio)
-        self.btn_save_audio.setVisible(False)
-        self.btn_save_audio.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; padding: 8px;")
-        bottom_layout.addWidget(self.btn_save_audio)
-        
-        bottom_layout.addStretch()  # Espaço flexível
-        
-        # Botão de copiar
-        self.btn_copy = QPushButton("Copiar Texto")
         self.btn_copy.clicked.connect(self._copy_text)
-        bottom_layout.addWidget(self.btn_copy)
-        
-        main_layout.addLayout(bottom_layout)
+        self.btn_save_audio.clicked.connect(self._save_current_audio)
 
-        # Timer para resetar o texto do botão copiar
         self.copy_timer = QTimer()
         self.copy_timer.setSingleShot(True)
         self.copy_timer.timeout.connect(self._reset_copy_button)
 
-        self.setLayout(main_layout)
-
     def _populate_mics(self):
-        try:
-            self.devices = sd.query_devices()
-            inputs = []
-            
-            print("Dispositivos de áudio disponíveis:")
-            for idx, dev in enumerate(self.devices):
-                if dev['max_input_channels'] > 0:
-                    inputs.append((idx, dev))
-                    print(f"  {idx}: {dev['name']} - {dev['max_input_channels']} canais - {dev['default_samplerate']}Hz")
-            
-            if not inputs:
-                self.mic_combo.addItem("Nenhum microfone encontrado", None)
-                return
-            
-            for real_idx, dev in inputs:
-                device_info = f"{dev['name']} ({dev['max_input_channels']} ch, {int(dev['default_samplerate'])}Hz)"
-                self.mic_combo.addItem(device_info, real_idx)
-                
-        except Exception as e:
-            QMessageBox.critical(self, "Erro", f"Erro ao listar microfones: {e}")
-            self.mic_combo.addItem("Erro ao carregar microfones", None)
+        """Preenche o ComboBox com os microfones encontrados."""
+        input_devices, all_devices = get_audio_devices()
+        self.devices = all_devices
 
+        if not input_devices:
+            self.mic_combo.addItem("Nenhum microfone encontrado", None)
+            return
+        
+        for real_idx, dev in input_devices:
+            device_info = f"{dev['name']} ({dev['max_input_channels']} ch, {int(dev['default_samplerate'])}Hz)"
+            self.mic_combo.addItem(device_info, real_idx)
+    
+
+    # Os métodos de lógica (_on_record_toggle, _start_recording, etc.) permanecem aqui.
+    # Seus corpos são praticamente os mesmos, mas agora eles são mais focados em
+    # controlar o fluxo da aplicação.
     def _on_record_toggle(self):
         """Alterna entre iniciar e parar gravação"""
         if self.is_recording:
             self._stop_recording()
         else:
             self._start_recording()
-
+    # ... (copie e cole todos os métodos de '_' da classe TranscricaoApp original aqui)
+    # Exemplo de um método adaptado:
     def _start_recording(self):
         """Inicia a gravação"""
         device_idx = self.mic_combo.currentData()
@@ -363,12 +182,13 @@ class TranscricaoApp(QWidget):
         if text:
             self.text_edit.setPlainText(text)
             self.status_label.setText("Transcrição concluída!")
-            self.status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
             
             # Se o áudio não deve ser mantido e é um arquivo temporário, mostra botão para salvar
             if not keep_audio and file_path == self.current_audio_file:
                 self.btn_save_audio.setVisible(True)
                 self.status_label.setText("Transcrição concluída! (arquivo temporário)")
+                self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
             
         else:
             self.text_edit.setPlainText("Nenhum texto foi detectado no áudio.")
@@ -426,7 +246,7 @@ class TranscricaoApp(QWidget):
             
             # Muda o texto do botão para "Copiado!"
             self.btn_copy.setText("Copiado!")
-            self.btn_copy.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+            self.btn_copy.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
             self.btn_copy.setEnabled(False)  # Desabilita o botão temporariamente
             
             # Inicia o timer para resetar o botão após 2 segundos
@@ -478,9 +298,3 @@ class TranscricaoApp(QWidget):
         self._cleanup_temp_file()
         
         event.accept()
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = TranscricaoApp()
-    window.show()
-    sys.exit(app.exec())
