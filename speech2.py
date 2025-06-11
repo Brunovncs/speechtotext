@@ -208,7 +208,7 @@ class TranscricaoApp(QWidget):
 
         # Label de status
         self.status_label = QLabel("Pronto para gravar ou selecionar arquivo")
-        self.status_label.setStyleSheet("color: #2ecc71; font-weight: bold;")
+        self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
         main_layout.addWidget(self.status_label)
 
         # Área de texto com transcrição
@@ -225,7 +225,7 @@ class TranscricaoApp(QWidget):
         self.btn_save_audio.setVisible(False)
         self.btn_save_audio.setStyleSheet("""
             QPushButton {
-                background-color: #4caf50;
+                background-color: #27ae60;
                 color: white;
                 font-weight: bold;
                 padding: 8px 16px;
@@ -436,6 +436,7 @@ class TranscricaoApp(QWidget):
             if not keep_audio and file_path == self.current_audio_file:
                 self.btn_save_audio.setVisible(True)
                 self.status_label.setText("Transcrição concluída! (arquivo temporário)")
+                self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
             
         else:
             self.text_edit.setPlainText("Nenhum texto foi detectado no áudio.")
