@@ -1,10 +1,8 @@
-# services/transcriber.py
-
 import whisper
 from PySide6.QtCore import QThread, Signal
 
 # Carrega o modelo globalmente para evitar recarregamentos
-MODEL = whisper.load_model("base")
+MODEL = whisper.load_model("medium")
 
 def get_model():
     """Retorna a instância do modelo Whisper carregado."""

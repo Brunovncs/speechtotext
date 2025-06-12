@@ -1,5 +1,3 @@
-# services/device_manager.py
-
 import sounddevice as sd
 
 def get_audio_devices():

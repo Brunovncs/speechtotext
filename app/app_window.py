@@ -17,24 +17,32 @@ from .services.device_manager import get_audio_devices
 from .services.audio_recorder import RecordingThread
 from .services.transcriber import TranscriptionThread, get_model
 
-class TranscricaoApp(QWidget):
+from .threads import ModelLoaderThread 
+
+class Speech2TextApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Transcrição de Áudio")
         self.setMinimumSize(600, 400)
         
         # Estado da aplicação
-        self.model = get_model()
+        self.current_model = None # ALTERADO: O modelo começa como None
+        self.model_loader_thread = None # NOVO: Referência para a thread de carregamento
+        self.loaded_model_name = None
         self.is_recording = False
         self.recording_thread = None
         self.transcription_thread = None
         self.current_audio_file = None
-        self.devices = None # Armazena a lista completa de dispositivos
+        self.devices = None 
 
         # Configuração da UI
         setup_ui(self)
         self._populate_mics()
+        self._populate_models() # NOVO: Preenche o ComboBox de modelos
         self._connect_signals()
+        
+        # NOVO: Inicia o carregamento do modelo padrão
+        self._change_model() 
 
     def _connect_signals(self):
         """Conecta os sinais dos widgets aos slots (métodos)."""
@@ -42,6 +50,9 @@ class TranscricaoApp(QWidget):
         self.btn_file.clicked.connect(self._on_select_file)
         self.btn_copy.clicked.connect(self._copy_text)
         self.btn_save_audio.clicked.connect(self._save_current_audio)
+
+        # NOVO: Conecta o combobox de modelo e a thread
+        self.model_combo.currentIndexChanged.connect(self._change_model)
 
         self.copy_timer = QTimer()
         self.copy_timer.setSingleShot(True)
@@ -60,18 +71,132 @@ class TranscricaoApp(QWidget):
             device_info = f"{dev['name']} ({dev['max_input_channels']} ch, {int(dev['default_samplerate'])}Hz)"
             self.mic_combo.addItem(device_info, real_idx)
     
+    def _populate_models(self):
+        """Adiciona os modelos disponíveis ao ComboBox."""
+        models = {
+            "Rápido (small)": "small",
+            "Equilibrado (medium)": "medium",
+            "Alta Qualidade (large-v3)": "large-v3",
+            "Muito Rápido (base)": "base",
+            "Extremamente Rápido (tiny)": "tiny"
+        }
+        for display_name, internal_name in models.items():
+            self.model_combo.addItem(display_name, internal_name)
+        
+        # Define o 'medium' como padrão
+        self.model_combo.setCurrentText("Equilibrado (medium)")
+    
+    # NOVO: Orquestra a mudança e carregamento de um novo modelo
+    # def _change_model(self):
+    #     """Inicia o carregamento de um novo modelo em uma thread."""
+    #     model_name = self.model_combo.currentData()
+    #     if not model_name:
+    #         return
 
-    # Os métodos de lógica (_on_record_toggle, _start_recording, etc.) permanecem aqui.
-    # Seus corpos são praticamente os mesmos, mas agora eles são mais focados em
-    # controlar o fluxo da aplicação.
+    #     # Desabilita a UI para evitar ações durante o carregamento
+    #     self.set_ui_enabled(False)
+    #     self.status_label.setText(f"Carregando modelo '{model_name}'... Por favor, aguarde.")
+    #     self.status_label.setStyleSheet("color: orange; font-weight: bold;")
+        
+    #     # Cria e inicia a thread
+    #     self.model_loader_thread = ModelLoaderThread(model_name)
+    #     self.model_loader_thread.model_loaded.connect(self._on_model_loaded)
+    #     self.model_loader_thread.start()
+    
+    
+    def _change_model(self):
+        """
+        Inicia o carregamento de um novo modelo, com um diálogo de confirmação 
+        se o download for necessário.
+        """
+        model_name = self.model_combo.currentData()
+        if not model_name:
+            return
+
+        # 1. Evita recarregar o mesmo modelo que já está ativo.
+        if model_name == self.loaded_model_name:
+            return
+
+        # 2. Verifica se o modelo já existe no cache do Whisper.
+        cache_path = os.path.join(os.path.expanduser("~"), ".cache", "whisper")
+        expected_model_file = os.path.join(cache_path, f"{model_name}.pt")
+
+        proceed = True # Flag para controlar se devemos prosseguir
+
+        # 3. Se o arquivo do modelo não existir, exibe o diálogo de confirmação.
+        if not os.path.exists(expected_model_file):
+            model_info = {
+                "large-v3": "aprox. 3.1 GB", "medium": "aprox. 1.5 GB",
+                "small": "aprox. 488 MB", "base": "aprox. 148 MB",
+                "tiny": "aprox. 78 MB"
+            }
+            info = model_info.get(model_name, "Tamanho desconhecido")
+
+            reply = QMessageBox.question(
+                self,
+                "Confirmar Download do Modelo",
+                f"O modelo '{model_name}' precisa ser baixado ({info}).\n"
+                "Esta é uma operação única e pode demorar alguns minutos.\n\n"
+                "Deseja continuar?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.No:
+                proceed = False
+                # 4. Lógica para reverter a seleção no ComboBox.
+                # Bloqueia sinais para evitar que essa mudança chame _change_model de novo.
+                self.model_combo.blockSignals(True)
+                # Procura o índice do modelo que estava carregado anteriormente.
+                if self.loaded_model_name:
+                    previous_index = self.model_combo.findData(self.loaded_model_name)
+                    self.model_combo.setCurrentIndex(previous_index)
+                self.model_combo.blockSignals(False)
+
+        # 5. Se o modelo já existe ou o usuário confirmou o download, continua o processo.
+        if proceed:
+            self.set_ui_enabled(False)
+            self.status_label.setText(f"Carregando modelo '{model_name}'... Por favor, aguarde.")
+            self.status_label.setStyleSheet("color: orange; font-weight: bold;")
+
+            self.model_loader_thread = ModelLoaderThread(model_name)
+            self.model_loader_thread.model_loaded.connect(self._on_model_loaded)
+            self.model_loader_thread.start()
+            
+    # NOVO: Chamado quando a thread de carregamento termina
+    def _on_model_loaded(self, model):
+        """Recebe o modelo carregado e atualiza a aplicação."""
+        if model:
+            self.current_model = model
+            self.status_label.setText(f"Modelo '{self.model_combo.currentData()}' pronto!")
+            self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
+        else:
+            self.current_model = None
+            self.status_label.setText("Falha ao carregar o modelo!")
+            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+            QMessageBox.critical(self, "Erro de Modelo", "Não foi possível carregar o modelo selecionado.")
+
+        # Reabilita a UI
+        self.set_ui_enabled(True)
+    
+    def set_ui_enabled(self, enabled):
+        """Habilita ou desabilita os principais widgets de interação."""
+        self.btn_record.setEnabled(enabled)
+        self.btn_file.setEnabled(enabled)
+        self.model_combo.setEnabled(enabled)
+        # Se estiver desabilitando, o texto deve ser claro
+        if not enabled:
+             self.btn_record.setText("Carregando...")
+        else:
+             self.btn_record.setText("Iniciar Gravação")
+    
     def _on_record_toggle(self):
         """Alterna entre iniciar e parar gravação"""
         if self.is_recording:
             self._stop_recording()
         else:
             self._start_recording()
-    # ... (copie e cole todos os métodos de '_' da classe TranscricaoApp original aqui)
-    # Exemplo de um método adaptado:
+
     def _start_recording(self):
         """Inicia a gravação"""
         device_idx = self.mic_combo.currentData()
@@ -100,6 +225,7 @@ class TranscricaoApp(QWidget):
         self.btn_record.setStyleSheet("background-color: #ff4444; color: white; font-weight: bold;")
         self.btn_file.setEnabled(False)  # Desabilita seleção de arquivo durante gravação
         self.save_audio_checkbox.setEnabled(False)  # Desabilita checkbox durante gravação
+        self.model_combo.setEnabled(False)
         self.status_label.setText("Gravando: 0 segundos")
         self.status_label.setStyleSheet("color: red; font-weight: bold;")
         
@@ -138,6 +264,7 @@ class TranscricaoApp(QWidget):
         self.btn_record.setStyleSheet("")  # Remove estilo customizado
         self.btn_file.setEnabled(True)  # Reabilita seleção de arquivo
         self.save_audio_checkbox.setEnabled(True)  # Reabilita checkbox
+        self.model_combo.setEnabled(True)
         self.status_label.setText("Gravação concluída! Iniciando transcrição...")
         self.status_label.setStyleSheet("color: green; font-weight: bold;")
         
@@ -153,6 +280,7 @@ class TranscricaoApp(QWidget):
         self.btn_record.setStyleSheet("")  # Remove estilo customizado
         self.btn_file.setEnabled(True)  # Reabilita seleção de arquivo
         self.save_audio_checkbox.setEnabled(True)  # Reabilita checkbox
+        self.model_combo.setEnabled(True)
         self.status_label.setText("Erro na gravação")
         self.status_label.setStyleSheet("color: red; font-weight: bold;")
         QMessageBox.critical(self, "Erro na Gravação", f"Falha ao gravar: {error_msg}")
@@ -166,19 +294,34 @@ class TranscricaoApp(QWidget):
             self._transcribe_file(path, keep_audio=True)  # Arquivos selecionados são sempre mantidos
 
     def _transcribe_file(self, path, keep_audio=False):
-        """Transcreve arquivo de áudio"""
+        # ALTERADO: Verifica se um modelo está carregado antes de transcrever
+        if self.current_model is None:
+            QMessageBox.critical(self, "Erro", "Nenhum modelo de IA carregado. Selecione um modelo e aguarde o carregamento.")
+            self.status_label.setText("Erro: Modelo não carregado.")
+            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+            return
+
         self.status_label.setText("Transcrevendo...")
         self.status_label.setStyleSheet("color: orange; font-weight: bold;")
         self.text_edit.setPlainText("Transcrevendo... Aguarde...")
         
-        # Cria e configura thread de transcrição
-        self.transcription_thread = TranscriptionThread(self.model, path, keep_audio)
+            # NOVO: Desabilita botões e mostra a barra de progresso
+        self.btn_record.setEnabled(False)
+        self.btn_file.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        
+        # ALTERADO: Passa o modelo carregado para a thread de transcrição
+        self.transcription_thread = TranscriptionThread(self.current_model, path, keep_audio)
         self.transcription_thread.transcription_finished.connect(self._on_transcription_success)
         self.transcription_thread.transcription_error.connect(self._on_transcription_error)
         self.transcription_thread.start()
 
     def _on_transcription_success(self, text, file_path, keep_audio):
         """Chamado quando transcrição é bem-sucedida"""
+        self.progress_bar.setVisible(False)
+        self.btn_record.setEnabled(True)
+        self.btn_file.setEnabled(True)
+    
         if text:
             self.text_edit.setPlainText(text)
             self.status_label.setText("Transcrição concluída!")
@@ -205,6 +348,10 @@ class TranscricaoApp(QWidget):
 
     def _on_transcription_error(self, error_msg):
         """Chamado quando há erro na transcrição"""
+        self.progress_bar.setVisible(False)
+        self.btn_record.setEnabled(True)
+        self.btn_file.setEnabled(True)
+        
         self.status_label.setText("Erro na transcrição")
         self.status_label.setStyleSheet("color: red; font-weight: bold;")
         self.text_edit.setPlainText(f"Erro na transcrição: {error_msg}")
@@ -281,10 +428,14 @@ class TranscricaoApp(QWidget):
                 print(f"Erro ao remover arquivo: {e}")
 
     def closeEvent(self, event):
-        """Garantir que threads sejam finalizadas e arquivos temporários removidos ao fechar o app"""
+        # AQUI VOCÊ TAMBÉM DEVE INTERROMPER A THREAD DE CARREGAMENTO DE MODELO
+        if self.model_loader_thread and self.model_loader_thread.isRunning():
+            self.model_loader_thread.quit()
+            self.model_loader_thread.wait()
+
         if self.is_recording and self.recording_thread:
             self.recording_thread.stop_recording()
-            self.recording_thread.wait(3000)  # Aguarda até 3 segundos
+            self.recording_thread.wait(3000)
         
         if self.recording_thread and self.recording_thread.isRunning():
             self.recording_thread.quit()
@@ -294,7 +445,6 @@ class TranscricaoApp(QWidget):
             self.transcription_thread.quit()
             self.transcription_thread.wait()
         
-        # Remove arquivo temporário se existir
         self._cleanup_temp_file()
         
         event.accept()
